@@ -12,6 +12,7 @@ from torch.utils.data import ConcatDataset, DataLoader
 
 from internlm.core.context import ParallelMode
 from internlm.core.context import global_context as gpc
+from internlm.core.context.random import set_mode
 from internlm.core.naive_amp import NaiveAMPModel
 from internlm.core.trainer import TrainState
 from internlm.data.batch_sampler import StaticBatchSampler, get_dpsampler_dataloader
@@ -81,6 +82,10 @@ def initialize_model():
     # the same across tensor parallelism.
     sync_model_param_within_tp(model)
 
+    # Change random state mode to ParallelMode.DATA after model is built, guaranteeing the random
+    # state in the same dp group are all the same.
+    set_mode(ParallelMode.DATA)
+
     return model
 
 
@@ -104,6 +109,8 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList]):
         params = create_moe_param_groups(model, adam_cfg.weight_decay)
     else:
         params = [{"params": model.parameters(), "weight_decay": adam_cfg.weight_decay}]
+
+    print((len(params)), "==================================", flush=True)
     naive_optimizer = torch.optim.AdamW(
         params=params,
         lr=adam_cfg.lr,
@@ -377,7 +384,7 @@ def record_current_batch_training_metrics(
         infos = {
             "tflops": tflops,
             "step": batch_count,
-            "loss": loss.item(),
+            "loss": loss.item() - moe_loss.item(),
             "moe_loss": moe_loss.item(),
             "tgs (tokens/gpu/second)": tk_per_gpu,
             "lr": lr,

@@ -312,6 +312,7 @@ class PackedFlashInternLm1D(nn.Module):
         moe_use_rts (bool, optional): default=True, whether to use Random Token Selection.
         moe_use_residual (bool, optional): default=False, make this MoE layer a Residual MoE
                                           (https://arxiv.org/abs/2201.05596) layer.
+        tie_embeddings_and_output_weights: embedding and output layer share the same weight.
     """
 
     def __init__(
@@ -349,8 +350,15 @@ class PackedFlashInternLm1D(nn.Module):
         moe_drop_tokens: bool = True,
         moe_use_rts: bool = True,
         moe_use_residual: bool = False,
+        tie_embeddings_and_output_weights: bool = True,
     ):
         super().__init__()
+
+        assert not (
+            embed_split_hidden and tie_embeddings_and_output_weights
+        ), "shared embedding weights is not supported when embed_split_hidden is True."
+        self.tie_embeddings_and_output_weights = tie_embeddings_and_output_weights
+        self.embed_split_hidden = embed_split_hidden
 
         checkpoint_layer_num = int(num_layers * checkpoint)
 
@@ -422,6 +430,7 @@ class PackedFlashInternLm1D(nn.Module):
                 device=device,
                 dtype=dtype,
                 weight_scale=embed_grad_scale,
+                skip_weight_alloction=self.tie_embeddings_and_output_weights,
             )
             for _, param in self.head.named_parameters():
                 normal_(std=0.0052)(param)
@@ -466,11 +475,25 @@ class PackedFlashInternLm1D(nn.Module):
         if hasattr(self, "norm"):
             hidden_states = self.norm(hidden_states.float())
         if hasattr(self, "head"):
-            hidden_states = self.head(hidden_states)
+            if self.tie_embeddings_and_output_weights:
+                hidden_states = self.head(hidden_states, self.shared_embedding_or_output_weight())
+            else:
+                hidden_states = self.head(hidden_states)
 
         if not self.parallel_output:
             hidden_states = gather_forward_split_backward(hidden_states, ParallelMode.TENSOR, dim=-1)
         return hidden_states, moe_losses
+
+    def shared_embedding_or_output_weight(self):
+        if not self.tie_embeddings_and_output_weights:
+            raise Exception(
+                "shared_embedding_or_output_weight() called for last "
+                "stage, but share_embeddings_and_output_weights is false"
+            )
+        if self.embed_split_hidden:
+            return self.embedding.weight
+        else:
+            return self.embedding.word_embeddings.weight
 
 
 def _build_generic_model_1d(num_layers, num_chunks, device=torch.device("cuda"), **kwargs):
@@ -538,7 +561,7 @@ def build_model_with_cfg(
     use_flash_attn: bool = True,
     sequence_parallel: bool = False,  # pylint: disable=W0613
     num_experts: int = 1,
-    moe_gate_k: int = 1,
+    moe_gate_k: int = 2,
     moe_capacity_factor: float = 1.0,
     moe_eval_capacity_factor: float = 1.0,
     moe_min_capacity: int = 4,
@@ -546,6 +569,7 @@ def build_model_with_cfg(
     moe_drop_tokens: bool = True,
     moe_use_rts: bool = True,
     moe_use_residual: bool = False,
+    tie_embeddings_and_output_weights=False,
 ):
     """
     Builde model with config
@@ -587,6 +611,7 @@ def build_model_with_cfg(
         moe_use_rts (bool, optional): default=True, whether to use Random Token Selection.
         moe_use_residual (bool, optional): default=False, make this MoE layer a Residual MoE
                                            (https://arxiv.org/abs/2201.05596) layer.
+        tie_embeddings_and_output_weights: embedding and output layer share the same weight.
     """
 
     cfg = dict(
@@ -618,6 +643,7 @@ def build_model_with_cfg(
         moe_drop_tokens=moe_drop_tokens,
         moe_use_rts=moe_use_rts,
         moe_use_residual=moe_use_residual,
+        tie_embeddings_and_output_weights=tie_embeddings_and_output_weights,
     )
 
     return _build_generic_model_1d(num_layers=num_layers, num_chunks=num_chunks, **cfg)
