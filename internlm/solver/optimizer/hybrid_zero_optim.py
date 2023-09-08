@@ -314,6 +314,9 @@ class HybridZeroOptimizer(BaseOptimizer):
     def _is_moe_group(self, param_group):
         return "moe" in param_group.keys() and param_group["moe"]
 
+    def _is_gate_group(self, param_group):
+        return "gate" in param_group.keys() and param_group["gate"]
+
     def _attach_reduction_hook(self):
         # we iterate over the fp16 params
         # on each param, we register a hook to its AccumulateGrad object
@@ -353,7 +356,7 @@ class HybridZeroOptimizer(BaseOptimizer):
         # check if the bucket is full
         # if full, will reduce the grads already in the bucket
         # after reduction, the bucket will be empty
-        if self._bucket_store.num_elements_in_bucket(reduce_rank) + param_size > self._reduce_bucket_size:
+        if self._bucket_store.num_elements_in_bucket(reduce_rank) > self._reduce_bucket_size:
             self._reduce_grads_stored_in_bucket(reduce_rank, last_bucket=False)
 
         # the param must not be reduced to ensure correctness
@@ -401,7 +404,6 @@ class HybridZeroOptimizer(BaseOptimizer):
                 self._param_store.add_reduced_param_for_compute_norm(param, last_bucket)
             else:
                 self._param_store.add_previous_reduced_param(param)
-
         self._bucket_store.reset_by_rank(reduce_rank)
 
     def _reduce_grads_by_rank(self, reduce_rank, grads, bucket_size):
@@ -430,7 +432,6 @@ class HybridZeroOptimizer(BaseOptimizer):
                 dst_rank=reduce_rank,
                 parallel_mode=ParallelMode.DATA,
             )
-
             # update the reduced tensor
             if reduce_rank is None or reduce_rank == self._zero_local_rank:
                 bucket.unflatten_and_copy(reduced_flat)
@@ -537,6 +538,7 @@ class HybridZeroOptimizer(BaseOptimizer):
             gradients=gradients,
             parameters=parameters,
             last_stage=True,
+            is_moe_group=True,
         )
 
         # Need to allreduce(avg) the norms across different ranks because moe params will not be synced during allreduce
@@ -567,7 +569,6 @@ class HybridZeroOptimizer(BaseOptimizer):
                     # we should not reduce the param in moe
                     if param.grad is not None and not is_moe_param(param):
                         self._store_and_try_reduce_grads_by_bucket(param)
-
         # we need to reduce the gradients left in the communication bucket
         self._reduce_grads_stored_in_bucket(reduce_rank=None, last_bucket=True)
 
@@ -685,7 +686,6 @@ class HybridZeroOptimizer(BaseOptimizer):
                     )
                     fp32_param = self._fp32_flat_param_groups_of_current_rank[group_id]
                     fp16_param.data.copy_(fp32_param)
-
         with torch.cuda.stream(self._broadcast_comm_stream):
             self.broadcast_params()
 

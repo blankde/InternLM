@@ -19,8 +19,17 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
 
+from internlm.core.context import ParallelMode
+from internlm.core.context import global_context as gpc
 from internlm.utils.logger import get_logger
 from internlm.utils.megatron_timers import megatron_timer as timer
+
+IS_GATE_PARAM = "is_gate_param"
+
+
+def is_gate_parameter(p):
+    return hasattr(p, IS_GATE_PARAM) and getattr(p, IS_GATE_PARAM)
+
 
 # global llm logger
 logger = get_logger(__file__)
@@ -367,6 +376,10 @@ class TopKGate(Module):
         self.gate_time = 0.0
         self.drop_tokens = drop_tokens
         self.use_rts = use_rts
+
+        if gpc.get_world_size(ParallelMode.TENSOR) > 1:
+            for param in self.wg.parameters():
+                param.is_gate = True
 
     def forward(
         self, inputs: torch.Tensor, used_token: torch.Tensor = None

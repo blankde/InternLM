@@ -49,6 +49,7 @@ class ScaleColumnParallelLinear(nn.Linear):
         super().__init__(in_features, out_features // world_size, bias=bias, device=device, dtype=dtype)
         if skip_weight_alloction:
             self.weight = None
+            self.register_parameter("weight", None)
         self.process_group = process_group
         self.weight_scale = weight_scale
 
