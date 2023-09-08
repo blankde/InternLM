@@ -19,8 +19,17 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
 
+from internlm.core.context import ParallelMode
+from internlm.core.context import global_context as gpc
 from internlm.utils.logger import get_logger
 from internlm.utils.megatron_timers import megatron_timer as timer
+
+IS_GATE_PARAM = "is_gate_param"
+
+
+def is_gate_parameter(p):
+    return hasattr(p, IS_GATE_PARAM) and getattr(p, IS_GATE_PARAM)
+
 
 # global llm logger
 logger = get_logger(__file__)
@@ -368,20 +377,30 @@ class TopKGate(Module):
         self.drop_tokens = drop_tokens
         self.use_rts = use_rts
 
+        if gpc.get_world_size(ParallelMode.TENSOR) > 1:
+            for param in self.wg.parameters():
+                param.is_gate = True
+
     def forward(
         self, inputs: torch.Tensor, used_token: torch.Tensor = None
     ) -> Tuple[Tensor, Tensor, Tensor]:  # type: ignore
 
         if self.wall_clock_breakdown:
             timer("TopKGate").start()
+        test_tensor = self.wg.weight
+        gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
+        torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+        all_equal = all(tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors)  # pylint: disable=R1729
 
-        if self.wg.weight.dtype != torch.float32:  # TODO can we change it to fp16
-            self.wg = self.wg.float()
-        inputs_fp32 = inputs.float()
+        if not all_equal:
+            assert False
+        # if self.wg.weight.dtype != torch.float32:  # TODO can we change it to fp16
+        #    self.wg = self.wg.float()
+        # inputs_fp32 = inputs.float()
         # input jittering
-        if self.noisy_gate_policy == "Jitter" and self.training:
-            inputs_fp32 = multiplicative_jitter(inputs_fp32, device=inputs.device)
-        logits = self.wg(inputs_fp32)
+        # if self.noisy_gate_policy == "Jitter" and self.training:
+        #    inputs_fp32 = multiplicative_jitter(inputs_fp32, device=inputs.device)
+        logits = self.wg(inputs).float()
 
         if self.k == 1:
             gate_output = top1gating(

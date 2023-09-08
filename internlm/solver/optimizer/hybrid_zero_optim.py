@@ -314,6 +314,9 @@ class HybridZeroOptimizer(BaseOptimizer):
     def _is_moe_group(self, param_group):
         return "moe" in param_group.keys() and param_group["moe"]
 
+    def _is_gate_group(self, param_group):
+        return "gate" in param_group.keys() and param_group["gate"]
+
     def _attach_reduction_hook(self):
         # we iterate over the fp16 params
         # on each param, we register a hook to its AccumulateGrad object
@@ -401,7 +404,6 @@ class HybridZeroOptimizer(BaseOptimizer):
                 self._param_store.add_reduced_param_for_compute_norm(param, last_bucket)
             else:
                 self._param_store.add_previous_reduced_param(param)
-
         self._bucket_store.reset_by_rank(reduce_rank)
 
     def _reduce_grads_by_rank(self, reduce_rank, grads, bucket_size):
@@ -410,6 +412,20 @@ class HybridZeroOptimizer(BaseOptimizer):
         for tensor_list in grad_buckets_by_dtype:
             param_bucket = TensorBucket(size=bucket_size)
             for tensor in tensor_list:
+                if hasattr(tensor, "is_gate") and tensor.is_gate:
+                    test_tensor = tensor
+                    gathered_tensors = [
+                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                    ]
+                    torch.distributed.all_gather(
+                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
+                    )
+                    all_equal = all(
+                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                    )  # pylint: disable=R1729
+
+                    if not all_equal:
+                        assert False
                 param_bucket.add_to_bucket(tensor, allow_oversize=True)
                 if param_bucket.is_full_or_oversized():
                     self._reduce_and_copy(bucket=param_bucket, reduce_rank=reduce_rank)
@@ -426,14 +442,14 @@ class HybridZeroOptimizer(BaseOptimizer):
             flat = bucket.flatten()
             reduced_flat = reduce_tensor(
                 tensor=flat,
-                dtype=self.dtype,
+                dtype=None,
                 dst_rank=reduce_rank,
                 parallel_mode=ParallelMode.DATA,
             )
-
             # update the reduced tensor
             if reduce_rank is None or reduce_rank == self._zero_local_rank:
                 bucket.unflatten_and_copy(reduced_flat)
+            self.check()
 
     def _has_inf_or_nan(self, tensor):
         try:
@@ -528,6 +544,30 @@ class HybridZeroOptimizer(BaseOptimizer):
 
         return norm
 
+    def check(self):
+        for group_id in range(self.num_param_groups):
+            if self._is_gate_group(self.optim.param_groups[group_id]):
+                parameters = self._param_store.get_fp16_params_by_rank_group(
+                    group_id=group_id, rank=self._zero_local_rank
+                )
+                for param in parameters:
+                    test_tensor = param
+                    if test_tensor is None:
+                        continue
+                    test_tensor = test_tensor.contiguous()
+                    gathered_tensors = [
+                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                    ]
+                    torch.distributed.all_gather(
+                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
+                    )
+                    all_equal = all(
+                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                    )  # pylint: disable=R1729
+
+                    if not all_equal:
+                        assert False
+
     def _compute_norm_with_moe_group(self, group_id):
         parameters = self._param_store.get_fp16_params_by_rank_group(group_id=group_id, rank=self._zero_local_rank)
         # wo do not get the average grad for moe parameters, so we have to constuct the gradients list here.
@@ -537,6 +577,7 @@ class HybridZeroOptimizer(BaseOptimizer):
             gradients=gradients,
             parameters=parameters,
             last_stage=True,
+            is_moe_group=True,
         )
 
         # Need to allreduce(avg) the norms across different ranks because moe params will not be synced during allreduce
@@ -557,20 +598,54 @@ class HybridZeroOptimizer(BaseOptimizer):
         Returns:
             Union[bool, float]: Whether the gradient is success updated, and the gradient.
         """
-        assert closure is None, "closure is not supported by step()"
-
         # if not overlapping communication (no reduction hook is attached)
         # we need to manually reduce these gradients
+        self.gate_group = False
+        for group_id in range(self.num_param_groups):
+            if self._is_gate_group(self.optim.param_groups[group_id]):
+                for param in self._fp16_param_groups[group_id]:
+                    test_tensor = param.grad
+                    gathered_tensors = [
+                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                    ]
+                    torch.distributed.all_gather(
+                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
+                    )
+                    all_equal = all(
+                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                    )  # pylint: disable=R1729
+
+                    if not all_equal:
+                        assert False
+
         if not self._overlap_sync_grad:
             for group_id in range(len(self._fp16_param_groups)):
                 for param in self._fp16_param_groups[group_id]:
                     # we should not reduce the param in moe
                     if param.grad is not None and not is_moe_param(param):
+                        if self._is_gate_group(self.optim.param_groups[group_id]):
+                            param.grad.is_gate = True
                         self._store_and_try_reduce_grads_by_bucket(param)
-
+                # self._reduce_grads_stored_in_bucket(reduce_rank=None, last_bucket=True)
         # we need to reduce the gradients left in the communication bucket
         self._reduce_grads_stored_in_bucket(reduce_rank=None, last_bucket=True)
 
+        for group_id in range(self.num_param_groups):
+            if self._is_gate_group(self.optim.param_groups[group_id]):
+                for param in self._fp16_param_groups[group_id]:
+                    test_tensor = param.grad
+                    gathered_tensors = [
+                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                    ]
+                    torch.distributed.all_gather(
+                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
+                    )
+                    all_equal = all(
+                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                    )  # pylint: disable=R1729
+
+                    if not all_equal:
+                        assert False
         # compute norm for gradients in the before bucket
         groups_norms = []
         for group_id in range(self.num_param_groups):
@@ -604,6 +679,22 @@ class HybridZeroOptimizer(BaseOptimizer):
 
     def _step(self, closure=None, norms=None):
         assert closure is None, "closure is not supported by step()"
+        for group_id in range(self.num_param_groups):
+            if self._is_gate_group(self.optim.param_groups[group_id]):
+                for grad in self._grad_store.get_averaged_gradients_by_group(group_id):
+                    test_tensor = grad
+                    gathered_tensors = [
+                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                    ]
+                    torch.distributed.all_gather(
+                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
+                    )
+                    all_equal = all(
+                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                    )  # pylint: disable=R1729
+
+                    if not all_equal:
+                        assert False
 
         # check for overflow
         found_inf = False
@@ -671,10 +762,57 @@ class HybridZeroOptimizer(BaseOptimizer):
         # update the parameters
         timer("step").start()
 
+        for group_id in range(len(self._fp16_param_groups)):
+            if self._is_gate_group(self.optim.param_groups[group_id]):
+                test_tensor = self._fp32_flat_param_groups_of_current_rank[group_id].grad
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+
+                if not all_equal:
+                    assert False
+
         # For those ranks that are not assigned parameters, we just wait for other ranks
         # to send them updated their own parameters.
         if self.has_params:
+            self.check()
+
+            for group_id in range(len(self._fp16_param_groups)):
+                if self._is_gate_group(self.optim.param_groups[group_id]):
+                    test_tensor = self._fp32_flat_param_groups_of_current_rank[group_id]
+                    gathered_tensors = [
+                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                    ]
+                    torch.distributed.all_gather(
+                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
+                    )
+                    all_equal = all(
+                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                    )  # pylint: disable=R1729
+
+                    if not all_equal:
+                        assert False
+
             self.optim.step()
+            for group_id in range(len(self._fp16_param_groups)):
+                if self._is_gate_group(self.optim.param_groups[group_id]):
+                    test_tensor = self._fp32_flat_param_groups_of_current_rank[group_id]
+                    gathered_tensors = [
+                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                    ]
+                    torch.distributed.all_gather(
+                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
+                    )
+                    all_equal = all(
+                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                    )  # pylint: disable=R1729
+
+                    if not all_equal:
+                        assert False
             # release the fp32 grad
             release_param_grad(self._fp32_flat_param_groups_of_current_rank.values())
             # update fp16 partition updated by the current rank
@@ -686,6 +824,7 @@ class HybridZeroOptimizer(BaseOptimizer):
                     fp32_param = self._fp32_flat_param_groups_of_current_rank[group_id]
                     fp16_param.data.copy_(fp32_param)
 
+            self.check()
         with torch.cuda.stream(self._broadcast_comm_stream):
             self.broadcast_params()
 

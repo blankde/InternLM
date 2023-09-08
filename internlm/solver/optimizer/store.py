@@ -319,4 +319,33 @@ class TensorBucket:
     def unflatten_and_copy(self, flat_tensor):
         unflattened_tensor_list = _unflatten_dense_tensors(flat_tensor, self._bucket)
         for old, new in zip(self._bucket, unflattened_tensor_list):
+            import torch
+
+            if hasattr(old, "is_gate") and old.is_gate:
+                torch.distributed.all_reduce(
+                    new, op=torch.distributed.ReduceOp.AVG, group=gpc.get_group(ParallelMode.TENSOR)
+                )
+                test_tensor = old
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+
+                if not all_equal:
+                    assert False
+                test_tensor = new
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+                if not all_equal:
+                    print(f"rank: {gpc.get_global_rank()} - old: {old}", flush=True)
+                    print(f"rank: {gpc.get_global_rank()} - new: {new}", flush=True)
+                    assert False
             old.copy_(new)

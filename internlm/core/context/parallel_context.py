@@ -555,5 +555,27 @@ class ParallelContext(metaclass=SingletonMeta):
     def set_virtual_pipeline_parallel_rank(self, rank):
         self.virtual_pipeline_parallel_rank = rank
 
+    def registe_model(self, model):
+        self.model = model
+
+    def check_gate(self):
+        for name, params in self.named_parameters():
+            if "gate" in name:
+                print("find")
+                test_tensor = params
+                if test_tensor is None:
+                    continue
+                test_tensor = test_tensor.contiguous()
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(self.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=self.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+
+                if not all_equal:
+                    print(name, flush=True)
+
 
 global_context = ParallelContext()

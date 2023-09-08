@@ -2,10 +2,10 @@ import typing
 from typing import Dict, Tuple
 
 import torch
-from flash_attn.modules.mlp import ParallelFusedMLP
 
 from internlm.core.context import ParallelMode
 from internlm.core.context import global_context as gpc
+from internlm.model.linear import FeedForward
 from internlm.moe.experts import Experts
 from internlm.moe.sharded_moe import MOELayer, TopKGate
 from internlm.utils.logger import get_logger
@@ -34,6 +34,12 @@ def has_moe_layers(m):
 
 def is_moe_param(param: torch.Tensor) -> bool:
     if hasattr(param, "is_expert") and param.is_expert:
+        return True
+    return False
+
+
+def is_gate_param(param: torch.Tensor) -> bool:
+    if hasattr(param, "is_gate") and param.is_gate:
         return True
     return False
 
@@ -102,17 +108,12 @@ class MoE(torch.nn.Module):
         experts = torch.nn.ModuleList(
             [
                 # TODO have trouble when use internlm.model.linear.FeedForward
-                ParallelFusedMLP(
+                FeedForward(
                     hidden_size,
                     int(hidden_size * gpc.config.model.mlp_ratio),
                     out_features=hidden_size,
-                    activation="gelu_approx",
                     process_group=gpc.get_group(ParallelMode.TENSOR),
-                    bias1=False,
-                    bias2=False,
-                    sequence_parallel=gpc.config.model.sequence_parallel,
-                    checkpoint_lvl=0,
-                    heuristic="auto",
+                    bias=False,
                     device=device,
                     dtype=dtype,
                 )
@@ -143,17 +144,12 @@ class MoE(torch.nn.Module):
         # residual network, see https://arxiv.org/pdf/2201.05596.pdf, seems useful for convergence
         self.use_residual = use_residual
         if use_residual:
-            self.residual_mlp = ParallelFusedMLP(
+            self.residual_mlp = FeedForward(
                 hidden_size,
                 int(hidden_size * gpc.config.model.mlp_ratio),
                 out_features=hidden_size,
-                activation="gelu_approx",
                 process_group=gpc.get_group(ParallelMode.TENSOR),
-                bias1=False,
-                bias2=False,
-                sequence_parallel=gpc.config.model.sequence_parallel,
-                checkpoint_lvl=0,
-                heuristic="auto",
+                bias=False,
                 device=device,
                 dtype=dtype,
             )
@@ -188,9 +184,7 @@ class MoE(torch.nn.Module):
         return output, self.moe_layer.l_aux, self.moe_layer.exp_counts
 
 
-def split_params_into_different_moe_groups_for_optimizer(
-    param_groups: Tuple[Dict], max_group_size=178956971
-) -> Tuple[Dict]:
+def split_params_into_different_moe_groups_for_optimizer(param_groups: Tuple[Dict], max_group_size=None) -> Tuple[Dict]:
     """Split parameters into different MoE groups for optimizer
     Compatiable with muiltiple param groups, each should have a name
 
@@ -217,6 +211,7 @@ def split_params_into_different_moe_groups_for_optimizer(
                 data_parallel_group_names.add(param.group_name)
     data_parallel_group_names = list(data_parallel_group_names)
     group_moe = {}
+    gate_group = {}
     # Create the param MoE groups, leave param assign to next step
     for param_group in param_groups:
         group_moe[param_group["name"]] = {}
@@ -230,16 +225,29 @@ def split_params_into_different_moe_groups_for_optimizer(
                         group_moe[param_group["name"]][key][ori_key] = []
                     else:
                         group_moe[param_group["name"]][key][ori_key] = param_group[ori_key]
+        gate_group["name"] = "gate"
+        gate_group["gate"] = True
+        for ori_key in param_group.keys():
+            if ori_key != "name":
+                if ori_key == "params":
+                    gate_group[ori_key] = []
+                else:
+                    gate_group[ori_key] = param_group[ori_key]
     # Assign param
+    gate_params = []
     for param_group in param_groups:
         new_params = []
         for param in param_group["params"]:
             if is_moe_param(param):
                 group_moe[param_group["name"]][param.group_name]["params"].append(param)
                 # param_group['params'].remove(param)
+            elif is_gate_param(param):
+                gate_params.append(param)
             else:
                 new_params.append(param)
         param_group["params"] = new_params
+    gate_group["params"] = gate_params
+    param_groups.append(gate_group)
 
     # Flatten the moe groups
     if max_group_size is not None:
