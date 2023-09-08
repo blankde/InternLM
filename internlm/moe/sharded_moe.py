@@ -385,6 +385,7 @@ class TopKGate(Module):
         self, inputs: torch.Tensor, used_token: torch.Tensor = None
     ) -> Tuple[Tensor, Tensor, Tensor]:  # type: ignore
 
+        dist.all_reduce(self.wg.weight, op=torch.distributed.ReduceOp.AVG, group=gpc.get_group(ParallelMode.TENSOR))
         if self.wall_clock_breakdown:
             timer("TopKGate").start()
 
