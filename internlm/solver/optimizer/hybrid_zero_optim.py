@@ -356,7 +356,7 @@ class HybridZeroOptimizer(BaseOptimizer):
         # check if the bucket is full
         # if full, will reduce the grads already in the bucket
         # after reduction, the bucket will be empty
-        if self._bucket_store.num_elements_in_bucket(reduce_rank) > self._reduce_bucket_size:
+        if self._bucket_store.num_elements_in_bucket(reduce_rank) + param_size > self._reduce_bucket_size:
             self._reduce_grads_stored_in_bucket(reduce_rank, last_bucket=False)
 
         # the param must not be reduced to ensure correctness
