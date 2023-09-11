@@ -11,7 +11,7 @@ from torch.optim import Optimizer
 
 from internlm.core.context import Config, ParallelMode
 from internlm.core.context import global_context as gpc
-from internlm.model.moe import is_moe_param
+from internlm.model.moe import is_moe_param  # pylint: disable=W0611
 from internlm.monitor import send_alert_message
 from internlm.solver.optimizer.store import (
     BucketStore,
@@ -125,6 +125,7 @@ class HybridZeroOptimizer(BaseOptimizer):
         self._param_store = ParameterStore(ParallelMode.ZERO1)
         self._grad_store = GradientStore(ParallelMode.DATA)
         self._bucket_store = BucketStore(ParallelMode.DATA)
+        self._gate_bucket_store = BucketStore(ParallelMode.DATA)
 
         # fp16 and fp32 params for mixed precision training
         self._fp16_param_groups = dict()
@@ -356,8 +357,13 @@ class HybridZeroOptimizer(BaseOptimizer):
         # check if the bucket is full
         # if full, will reduce the grads already in the bucket
         # after reduction, the bucket will be empty
-        if self._bucket_store.num_elements_in_bucket(reduce_rank) + param_size > self._reduce_bucket_size:
-            self._reduce_grads_stored_in_bucket(reduce_rank, last_bucket=False)
+        if is_moe_param(param):
+            current_bucket = self._bucket_store
+        else:
+            current_bucket = self._gate_bucket_store
+
+        if current_bucket.num_elements_in_bucket(reduce_rank) + param_size > self._reduce_bucket_size:
+            self._reduce_grads_stored_in_bucket(current_bucket, reduce_rank, last_bucket=False)
 
         # the param must not be reduced to ensure correctness
         is_param_reduced = self._param_store.is_param_reduced(param)
@@ -371,19 +377,25 @@ class HybridZeroOptimizer(BaseOptimizer):
         # the param must have grad for reduction
         assert param.grad is not None, f"Parameter of size ({param.size()}) has None grad, cannot be reduced"
 
-        self._bucket_store.add_num_elements_in_bucket(param_size, reduce_rank)
-        self._bucket_store.add_grad(param.grad, reduce_rank)
-        self._bucket_store.add_param(param, reduce_rank)
+        current_bucket.add_num_elements_in_bucket(param_size, reduce_rank)
+        from internlm.utils.parallel import is_model_parallel_parameter
 
-    def _reduce_grads_stored_in_bucket(self, reduce_rank=None, last_bucket=False):
+        if is_model_parallel_parameter(param):
+            param.grad.IS_TENSOR_PARALLEL = True
+        else:
+            param.grad.IS_TENSOR_PARALLEL = False
+        current_bucket.add_grad(param.grad, reduce_rank)
+        current_bucket.add_param(param, reduce_rank)
+
+    def _reduce_grads_stored_in_bucket(self, current_bucket, reduce_rank=None, last_bucket=False):
         # reduce grads
         self._reduce_grads_by_rank(
             reduce_rank=reduce_rank,
-            grads=self._bucket_store.get_grad(reduce_rank=reduce_rank),
-            bucket_size=self._bucket_store.num_elements_in_bucket(reduce_rank),
+            grads=current_bucket.get_grad(reduce_rank=reduce_rank),
+            bucket_size=current_bucket.num_elements_in_bucket(reduce_rank),
         )
 
-        params_in_bucket = self._bucket_store.get_param(reduce_rank=reduce_rank)
+        params_in_bucket = current_bucket.get_param(reduce_rank=reduce_rank)
 
         for param in params_in_bucket:
             # the is_param_reduced flag should be False showing that
@@ -404,7 +416,7 @@ class HybridZeroOptimizer(BaseOptimizer):
                 self._param_store.add_reduced_param_for_compute_norm(param, last_bucket)
             else:
                 self._param_store.add_previous_reduced_param(param)
-        self._bucket_store.reset_by_rank(reduce_rank)
+        current_bucket.reset_by_rank(reduce_rank)
 
     def _reduce_grads_by_rank(self, reduce_rank, grads, bucket_size):
         grad_buckets_by_dtype = split_half_float_double(grads)
@@ -435,21 +447,51 @@ class HybridZeroOptimizer(BaseOptimizer):
 
     def _reduce_and_copy(self, bucket: TensorBucket, reduce_rank):
         if self._overlap_sync_grad:
-            self._comm_stream.synchronize()
+            torch.cuda.synchronize()
             self._param_store.clear_grads_of_previous_reduced_params()
 
-        with torch.cuda.stream(self._comm_stream):
-            flat = bucket.flatten()
-            reduced_flat = reduce_tensor(
-                tensor=flat,
-                dtype=None,
-                dst_rank=reduce_rank,
-                parallel_mode=ParallelMode.DATA,
-            )
-            # update the reduced tensor
-            if reduce_rank is None or reduce_rank == self._zero_local_rank:
-                bucket.unflatten_and_copy(reduced_flat)
-            self.check()
+        # with torch.cuda.stream(self._comm_stream):
+        flat = bucket.flatten()
+        from torch._utils import _unflatten_dense_tensors
+
+        unflattened_tensor_list = _unflatten_dense_tensors(flat, bucket._bucket)
+        for old, new in zip(bucket._bucket, unflattened_tensor_list):
+            if not old.IS_TENSOR_PARALLEL:
+                # torch.distributed.all_reduce(
+                #    new, op=torch.distributed.ReduceOp.AVG, group=gpc.get_group(ParallelMode.TENSOR)
+                # )
+                test_tensor = old
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+
+                if not all_equal:
+                    print(f"rank: {gpc.get_global_rank()} - old: {old}", flush=True)
+                    assert False
+                test_tensor = new
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+                if not all_equal:
+                    # print(f"rank: {gpc.get_global_rank()} - new: {new}", flush=True)
+                    assert False
+        reduced_flat = reduce_tensor(
+            tensor=flat,
+            dtype=None,
+            dst_rank=reduce_rank,
+            parallel_mode=ParallelMode.DATA,
+        )
+        # update the reduced tensor
+        if reduce_rank is None or reduce_rank == self._zero_local_rank:
+            bucket.unflatten_and_copy(reduced_flat)
 
     def _has_inf_or_nan(self, tensor):
         try:
@@ -616,6 +658,7 @@ class HybridZeroOptimizer(BaseOptimizer):
                     )  # pylint: disable=R1729
 
                     if not all_equal:
+                        print(param.grad, flush=True)
                         assert False
 
         if not self._overlap_sync_grad:
@@ -625,10 +668,14 @@ class HybridZeroOptimizer(BaseOptimizer):
                     if param.grad is not None and not is_moe_param(param):
                         if self._is_gate_group(self.optim.param_groups[group_id]):
                             param.grad.is_gate = True
-                        self._store_and_try_reduce_grads_by_bucket(param)
+                            # reduce_tensor(tensor=param.grad, parallel_mode=ParallelMode.DATA)
+                            self._store_and_try_reduce_grads_by_bucket(param)
+                        else:
+                            self._store_and_try_reduce_grads_by_bucket(param)
                 # self._reduce_grads_stored_in_bucket(reduce_rank=None, last_bucket=True)
         # we need to reduce the gradients left in the communication bucket
-        self._reduce_grads_stored_in_bucket(reduce_rank=None, last_bucket=True)
+        self._reduce_grads_stored_in_bucket(self._bucket_store, reduce_rank=None, last_bucket=True)
+        self._reduce_grads_stored_in_bucket(self._gate_bucket_store, reduce_rank=None, last_bucket=True)
 
         for group_id in range(self.num_param_groups):
             if self._is_gate_group(self.optim.param_groups[group_id]):
@@ -657,7 +704,7 @@ class HybridZeroOptimizer(BaseOptimizer):
         # clear reduced grads
         if self._overlap_sync_grad:
             # grads in the last bucket is reduced
-            self._comm_stream.synchronize()
+            torch.cuda.synchronize()
             self._param_store.clear_grads_of_previous_reduced_params()
 
         # compute norm for gradients in the last bucket
@@ -779,8 +826,6 @@ class HybridZeroOptimizer(BaseOptimizer):
         # For those ranks that are not assigned parameters, we just wait for other ranks
         # to send them updated their own parameters.
         if self.has_params:
-            self.check()
-
             for group_id in range(len(self._fp16_param_groups)):
                 if self._is_gate_group(self.optim.param_groups[group_id]):
                     test_tensor = self._fp32_flat_param_groups_of_current_rank[group_id]
@@ -824,7 +869,6 @@ class HybridZeroOptimizer(BaseOptimizer):
                     fp32_param = self._fp32_flat_param_groups_of_current_rank[group_id]
                     fp16_param.data.copy_(fp32_param)
 
-            self.check()
         with torch.cuda.stream(self._broadcast_comm_stream):
             self.broadcast_params()
 

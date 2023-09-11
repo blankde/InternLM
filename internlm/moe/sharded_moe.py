@@ -235,6 +235,14 @@ def top1gating(
     else:
         mask1_rand = mask1
 
+    test_tensor = mask1_rand
+    gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
+    torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+    all_equal = all(tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors)  # pylint: disable=R1729
+
+    if not all_equal:
+        assert False
+
     assert logits.shape[0] >= min_capacity, (
         "No. of tokens (batch-size) should be greater than min_capacity."
         "Either set min_capacity to 0 or increase your batch size."
@@ -357,7 +365,7 @@ class TopKGate(Module):
         eval_capacity_factor: float = 1.0,
         min_capacity: int = 8,
         noisy_gate_policy: Optional[str] = None,
-        drop_tokens: bool = True,
+        drop_tokens: bool = False,
         use_rts: bool = True,
     ) -> None:
         super().__init__()
@@ -387,6 +395,7 @@ class TopKGate(Module):
 
         if self.wall_clock_breakdown:
             timer("TopKGate").start()
+        # dist.all_reduce(self.)
         test_tensor = self.wg.weight
         gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
         torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
