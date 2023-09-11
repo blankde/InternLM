@@ -662,20 +662,20 @@ class HybridZeroOptimizer(BaseOptimizer):
 
     def _reduce_and_copy(self, bucket: TensorBucket, reduce_rank):
         if self._overlap_sync_grad:
-            self._comm_stream.synchronize()
+            torch.cuda.synchronize()
             self._param_store.clear_grads_of_previous_reduced_params()
 
-        with torch.cuda.stream(self._comm_stream):
-            flat = bucket.flatten()
-            reduced_flat = reduce_tensor(
-                tensor=flat,
-                dtype=self.dtype,
-                dst_rank=reduce_rank,
-                parallel_mode=ParallelMode.DATA,
-            )
-            # update the reduced tensor
-            if reduce_rank is None or reduce_rank == self._zero_local_rank:
-                bucket.unflatten_and_copy(reduced_flat)
+        # with torch.cuda.stream(self._comm_stream):
+        flat = bucket.flatten()
+        reduced_flat = reduce_tensor(
+            tensor=flat,
+            dtype=self.dtype,
+            dst_rank=reduce_rank,
+            parallel_mode=ParallelMode.DATA,
+        )
+        # update the reduced tensor
+        if reduce_rank is None or reduce_rank == self._zero_local_rank:
+            bucket.unflatten_and_copy(reduced_flat)
 
     def _has_inf_or_nan(self, tensor):
         try:
@@ -754,10 +754,7 @@ class HybridZeroOptimizer(BaseOptimizer):
         previous_norm=None,
     ):
         # compute norm for gradients that have been reduced
-        params = self._param_store.get_fp16_params_by_rank_group(group_id=group_id, rank=self._zero_local_rank)
-        # wo do not get the average grad for moe parameters, so we have to constuct the gradients list here.
-        # Maybe this can be optimized.
-        grads = [p.grad for p in params]
+        params, grads = self._param_store.get_reduced_param_for_compute_norm(group_id=group_id, last_bucket=last_bucket)
         if len(params) == 0:
             grads = [self.padding_grad]
             params = [self.padding_tensor]
@@ -812,23 +809,23 @@ class HybridZeroOptimizer(BaseOptimizer):
                 for param in self._fp16_param_groups[group_id]:
                     # we should not reduce the param in moe
                     if param.grad is not None and not is_moe_param(param):
-                        reduce_tensor(tensor=param.grad, parallel_mode=ParallelMode.DATA)
-                        # self._store_and_try_reduce_grads_by_bucket(param)
+                        # reduce_tensor(tensor=param.grad, parallel_mode=ParallelMode.DATA)
+                        self._store_and_try_reduce_grads_by_bucket(param)
         # we need to reduce the gradients left in the communication bucket
-        # self._reduce_grads_stored_in_bucket(reduce_rank=None, last_bucket=True)
+        self._reduce_grads_stored_in_bucket(reduce_rank=None, last_bucket=True)
 
         # compute norm for gradients in the before bucket
-        # groups_norms = []
-        # for group_id in range(self.num_param_groups):
-        #    if self._is_moe_group(self.optim.param_groups[group_id]):
-        #        groups_norms.append([])
-        #    else:
-        #        groups_norms.append(self._compute_norm_with_stage(group_id=group_id))
+        groups_norms = []
+        for group_id in range(self.num_param_groups):
+            if self._is_moe_group(self.optim.param_groups[group_id]):
+                groups_norms.append([])
+            else:
+                groups_norms.append(self._compute_norm_with_stage(group_id=group_id))
 
         # clear reduced grads
         if self._overlap_sync_grad:
             # grads in the last bucket is reduced
-            self._comm_stream.synchronize()
+            torch.cuda.synchronize()
             self._param_store.clear_grads_of_previous_reduced_params()
 
         # compute norm for gradients in the last bucket
@@ -843,6 +840,7 @@ class HybridZeroOptimizer(BaseOptimizer):
                     group_id=group_id,
                     last_bucket=True,
                     last_stage=True,
+                    previous_norm=groups_norms[group_id],
                 )
         timer("sync_grad").start()
         self._sync_grad()
@@ -935,8 +933,8 @@ class HybridZeroOptimizer(BaseOptimizer):
                     )
                     fp32_param = self._fp32_flat_param_groups_of_current_rank[group_id]
                     fp16_param.data.copy_(fp32_param)
-        with torch.cuda.stream(self._broadcast_comm_stream):
-            self.broadcast_params()
+        # with torch.cuda.stream(self._broadcast_comm_stream):
+        self.broadcast_params()
 
         timer("step").stop()
 
