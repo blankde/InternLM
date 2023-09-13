@@ -110,7 +110,7 @@ def initialize_model():
 
                     if not all_equal:
                         print(name, flush=True)
-                        pass
+                        assert False
 
                 for test_tensor in module_output_gard:
                     if test_tensor is None:
@@ -128,12 +128,33 @@ def initialize_model():
 
                     if not all_equal:
                         print(name, flush=True)
-                        pass
+                        assert False
 
         return hook_backward_function
 
+    def grad_hook(name):
+        def hook_func(grad):
+            with torch.no_grad():
+                test_tensor = grad
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+
+                if not all_equal:
+                    print(name, flush=True)
+                    assert False
+
+        return hook_func
+
     for name, module in model.model.blocks.named_modules():
-        module.register_full_backward_hook(wrapper(name))
+        if "gate" in name:
+            module.register_full_backward_hook(wrapper(name))
+            for name, param in module.named_parameters():
+                param.register_hook(grad_hook(name))
 
     return model
 

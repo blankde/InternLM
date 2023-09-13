@@ -103,7 +103,61 @@ class _AllToAll(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
+        with torch.no_grad():
+            for test_tensor in grad_output:
+                if test_tensor is None:
+                    continue
+                test_tensor = test_tensor.contiguous()
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+
+                if not all_equal:
+                    assert False
         return (None, _AllToAll.apply(ctx.group, *grad_output))
+
+
+# Based on https://github.com/pytorch/pytorch/pull/40762
+class _AllToAll2(torch.autograd.Function):
+    """
+    All to all communication
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        # TODO: replace with DS process group
+        group: torch.distributed.ProcessGroup,
+        inputs: Tensor,
+    ) -> Tensor:  # type: ignore
+        ctx.group = group
+        inputs = inputs.contiguous()
+        output = torch.empty_like(inputs)
+        dist.all_to_all_single(output, inputs, group=group)
+        return output
+
+    @staticmethod
+    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
+        with torch.no_grad():
+            for test_tensor in grad_output:
+                if test_tensor is None:
+                    continue
+                test_tensor = test_tensor.contiguous()
+                gathered_tensors = [
+                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
+                ]
+                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+                all_equal = all(
+                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+                )  # pylint: disable=R1729
+
+                if not all_equal:
+                    assert False
+        return (None, _AllToAll2.apply(ctx.group, *grad_output))
 
 
 # einsum rewrites are on par or more performant
@@ -396,7 +450,8 @@ class TopKGate(Module):
 
         if self.wall_clock_breakdown:
             timer("TopKGate").start()
-        # dist.all_reduce(self.)
+        dist.all_reduce(self.wg.weight, op=dist.ReduceOp.AVG, group=gpc.get_group(ParallelMode.TENSOR))
+        dist.all_reduce(inputs[0], op=dist.ReduceOp.AVG, group=gpc.get_group(ParallelMode.TENSOR))
         with torch.no_grad():
             test_tensor = self.wg.weight
             gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
@@ -503,7 +558,7 @@ class MOELayer(Base):
         if self.wall_clock_breakdown:
             timer("salltoall").start()
 
-        expert_output = _AllToAll.apply(self.ep_group, expert_output)
+        expert_output = _AllToAll2.apply(self.ep_group, expert_output)
 
         if self.wall_clock_breakdown:
             timer("salltoall").stop()
