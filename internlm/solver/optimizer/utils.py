@@ -94,14 +94,35 @@ def reduce_tensor(tensor, dtype=None, dst_rank=None, parallel_mode=ParallelMode.
     :type dst_rank: int, optional
     :type parallel_mode: ParallelMode, optional
     """
+    # use the original dtype
+    # if dtype is None:
+    assert dtype is None
+    dtype = tensor.dtype
 
-    # world_size = gpc.get_world_size(parallel_mode)  # pylint: disable=W0613
-    group = gpc.get_group(parallel_mode)
+    # cast the data to specified dtype for reduce/all-reduce
+    # if tensor.dtype != dtype:
+    #     tensor_to_reduce = tensor.to(dtype)
+    # else:
+    #     tensor_to_reduce = tensor
+
+    # world_size = gpc.get_world_size(parallel_mode)
     # tensor.div_(world_size)
+    group = gpc.get_group(parallel_mode)
 
-    dist.all_reduce(tensor, group=group)
+    # if rank is None, all reduce will be used
+    # else, reduce is used
+    use_all_reduce = dst_rank is None
 
-    return tensor
+    if use_all_reduce:
+        handle = dist.all_reduce(tensor=tensor, group=group, op=torch.distributed.ReduceOp.AVG, async_op=True)
+    else:
+        ranks_in_group = gpc.get_ranks_in_group(parallel_mode)
+        global_rank = ranks_in_group[dst_rank]
+        handle = dist.reduce(
+            tensor=tensor, dst=global_rank, group=group, op=torch.distributed.ReduceOp.AVG, async_op=True
+        )
+
+    return handle
 
 
 def has_inf_or_nan(tensor):
@@ -290,6 +311,9 @@ def compute_norm(gradients, parameters, last_stage=False, previous_norm=None, no
     # Scale.
     if total_norm == float("inf") or total_norm == -float("inf"):
         total_norm = -1
+
+    if math.isnan(total_norm):
+        total_norm = -2
 
     return total_norm
 
