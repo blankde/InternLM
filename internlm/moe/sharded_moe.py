@@ -377,7 +377,7 @@ class TopKGate(Module):
 
         # the precision align hook is to fix the cumulative inconsistency of the gate weights under the TP groups.
         # if the causes or reasons of this issue are discovered and can be fixed, this hook should also be removed.
-        def _precision_align_hook(module, inputs):
+        def _precision_align_hook(module, inputs):  # pylint: disable=W0612
             all_reduce_func = partial(
                 dist.all_reduce,
                 op=dist.ReduceOp.AVG,
@@ -391,7 +391,7 @@ class TopKGate(Module):
 
             return inputs
 
-        self.register_forward_pre_hook(_precision_align_hook)
+        # self.register_forward_pre_hook(_precision_align_hook)
 
     def forward(
         self, inputs: torch.Tensor, used_token: torch.Tensor = None
@@ -400,13 +400,13 @@ class TopKGate(Module):
         if self.wall_clock_breakdown:
             timer("TopKGate").start()
 
-        if self.wg.weight.dtype != torch.float32:  # TODO can we change it to fp16
-            self.wg = self.wg.float()
-        inputs_fp32 = inputs.float()
+        # if self.wg.weight.dtype != torch.float32:  # TODO can we change it to fp16
+        #    self.wg = self.wg.float()
+        # inputs_fp32 = inputs.float()
         # input jittering
-        if self.noisy_gate_policy == "Jitter" and self.training:
-            inputs_fp32 = multiplicative_jitter(inputs_fp32, device=inputs.device)
-        logits = self.wg(inputs_fp32)
+        # if self.noisy_gate_policy == "Jitter" and self.training:
+        #    inputs_fp32 = multiplicative_jitter(inputs_fp32, device=inputs.device)
+        logits = self.wg(inputs).float()
 
         if self.k == 1:
             gate_output = top1gating(
