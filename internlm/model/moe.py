@@ -38,6 +38,12 @@ def is_moe_param(param: torch.Tensor) -> bool:
     return False
 
 
+def is_gate_param(param: torch.Tensor) -> bool:
+    if hasattr(param, "is_gate") and param.is_gate:
+        return True
+    return False
+
+
 class MoE(torch.nn.Module):
     """Initialize an MoE layer.
 
@@ -205,6 +211,7 @@ def split_params_into_different_moe_groups_for_optimizer(param_groups: Tuple[Dic
                 data_parallel_group_names.add(param.group_name)
     data_parallel_group_names = list(data_parallel_group_names)
     group_moe = {}
+    gate_group = {}
     # Create the param MoE groups, leave param assign to next step
     for param_group in param_groups:
         group_moe[param_group["name"]] = {}
@@ -218,16 +225,29 @@ def split_params_into_different_moe_groups_for_optimizer(param_groups: Tuple[Dic
                         group_moe[param_group["name"]][key][ori_key] = []
                     else:
                         group_moe[param_group["name"]][key][ori_key] = param_group[ori_key]
+        gate_group["name"] = "gate"
+        gate_group["gate"] = True
+        for ori_key in param_group.keys():
+            if ori_key != "name":
+                if ori_key == "params":
+                    gate_group[ori_key] = []
+                else:
+                    gate_group[ori_key] = param_group[ori_key]
     # Assign param
+    gate_params = []
     for param_group in param_groups:
         new_params = []
         for param in param_group["params"]:
             if is_moe_param(param):
                 group_moe[param_group["name"]][param.group_name]["params"].append(param)
                 # param_group['params'].remove(param)
+            elif is_gate_param(param):
+                gate_params.append(param)
             else:
                 new_params.append(param)
         param_group["params"] = new_params
+    gate_group["params"] = gate_params
+    param_groups.append(gate_group)
 
     # Flatten the moe groups
     if max_group_size is not None:

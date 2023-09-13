@@ -11,6 +11,7 @@ https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/moe/experts.py
 # DeepSpeed Team
 
 
+from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
@@ -19,6 +20,8 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
 
+from internlm.core.context import ParallelMode
+from internlm.core.context import global_context as gpc
 from internlm.utils.logger import get_logger
 from internlm.utils.megatron_timers import megatron_timer as timer
 
@@ -367,6 +370,28 @@ class TopKGate(Module):
         self.gate_time = 0.0
         self.drop_tokens = drop_tokens
         self.use_rts = use_rts
+
+        if gpc.get_world_size(ParallelMode.TENSOR) > 1:
+            for param in self.wg.parameters():
+                param.is_gate = True
+
+        # the precision align hook is to fix the cumulative inconsistency of the gate weights under the TP groups.
+        # if the causes or reasons of this issue are discovered and can be fixed, this hook should also be removed.
+        def _precision_align_hook(module, inputs):
+            all_reduce_func = partial(
+                dist.all_reduce,
+                op=dist.ReduceOp.AVG,
+                group=gpc.get_group(ParallelMode.TENSOR)
+            )
+
+            all_reduce_func(module.wg.weight)
+            for input in inputs:
+                if input is not None:
+                    all_reduce_func(input)
+
+            return inputs
+
+        self.register_forward_pre_hook(_precision_align_hook)
 
     def forward(
         self, inputs: torch.Tensor, used_token: torch.Tensor = None
