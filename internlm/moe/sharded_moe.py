@@ -385,9 +385,9 @@ class TopKGate(Module):
             )
 
             all_reduce_func(module.wg.weight)
-            for input in inputs:
-                if input is not None:
-                    all_reduce_func(input)
+            for _input in inputs:
+                if _input is not None:
+                    all_reduce_func(_input)
 
             return inputs
 
