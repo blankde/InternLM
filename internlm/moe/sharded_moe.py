@@ -381,7 +381,7 @@ class TopKGate(Module):
             all_reduce_func = partial(
                 dist.all_reduce,
                 op=dist.ReduceOp.AVG,
-                group=gpc.get_group(ParallelMode.TENSOR)
+                group=gpc.get_group(ParallelMode.TENSOR),
             )
 
             all_reduce_func(module.wg.weight)

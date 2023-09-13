@@ -604,11 +604,11 @@ class HybridZeroOptimizer(BaseOptimizer):
                 total_norms[group_name] = self._compute_norm_with_moe_group(group_id=group_id)
             else:
                 total_norms[group_name] = self._compute_norm_with_stage(
-                        group_id=group_id,
-                        last_bucket=True,
-                        last_stage=True,
-                        previous_norm=groups_norms[group_id]
-                    )
+                    group_id=group_id,
+                    last_bucket=True,
+                    last_stage=True,
+                    previous_norm=groups_norms[group_id],
+                )
 
         timer("sync_grad").start()
         self._sync_grad()
