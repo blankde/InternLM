@@ -236,12 +236,13 @@ def top1gating(
         mask1_rand = mask1
 
     test_tensor = mask1_rand
-    gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
-    torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-    all_equal = all(tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors)  # pylint: disable=R1729
+    with torch.no_grad():
+        gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
+        torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+        all_equal = all(tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors)  # pylint: disable=R1729
 
-    if not all_equal:
-        assert False
+        if not all_equal:
+            assert False
 
     assert logits.shape[0] >= min_capacity, (
         "No. of tokens (batch-size) should be greater than min_capacity."
@@ -396,13 +397,16 @@ class TopKGate(Module):
         if self.wall_clock_breakdown:
             timer("TopKGate").start()
         # dist.all_reduce(self.)
-        test_tensor = self.wg.weight
-        gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
-        torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-        all_equal = all(tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors)  # pylint: disable=R1729
+        with torch.no_grad():
+            test_tensor = self.wg.weight
+            gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
+            torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
+            all_equal = all(
+                tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
+            )  # pylint: disable=R1729
 
-        if not all_equal:
-            assert False
+            if not all_equal:
+                assert False
         # if self.wg.weight.dtype != torch.float32:  # TODO can we change it to fp16
         #    self.wg = self.wg.float()
         # inputs_fp32 = inputs.float()
