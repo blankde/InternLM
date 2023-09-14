@@ -172,7 +172,7 @@ def _top_idx(source, k):
 
 @torch.jit.script
 def _one_hot_to_float(x, num_classes):
-    return F.one_hot(x, num_classes=num_classes).float()
+    return F.one_hot(x, num_classes=num_classes)
 
 
 def top1gating(
@@ -187,6 +187,7 @@ def top1gating(
     """Implements Top1Gating on logits."""
     if noisy_gate_policy == "RSample":
         logits_w_noise = logits + gumbel_rsample(logits.shape, device=logits.device)
+    dtype = logits.dtype
     # everything is in fp32 in this function
     gates = F.softmax(logits, dim=1)
 
@@ -213,7 +214,7 @@ def top1gating(
 
     # Compute l_aux
     me = torch.mean(gates, dim=0)
-    ce = torch.mean(mask1.float(), dim=0)
+    ce = torch.mean(mask1.to(dtype), dim=0)
     l_aux = torch.sum(me * ce) * num_experts
 
     # Random Token Selection
@@ -247,10 +248,10 @@ def top1gating(
     locations1_s = torch.sum(locations1 * mask1, dim=1)
 
     # Normalize gate probabilities
-    mask1_float = mask1.float()
+    mask1_float = mask1.to(dtype)
     gates = gates * mask1_float
 
-    locations1_sc = _one_hot_to_float(locations1_s, capacity)
+    locations1_sc = _one_hot_to_float(locations1_s, capacity).to(dtype)
     combine_weights = einsum("se,sc->sec", gates, locations1_sc)
 
     dispatch_mask = combine_weights.bool()
@@ -261,6 +262,7 @@ def top1gating(
 def top2gating(logits: Tensor, capacity_factor: float, min_capacity: int) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """Implements Top2Gating on logits."""
     # everything is in fp32 in this function
+    dtype = logits.dtype
     gates = F.softmax(logits, dim=1)
 
     capacity = _capacity(gates, torch.tensor(capacity_factor * 2), torch.tensor(min_capacity))
@@ -289,7 +291,7 @@ def top2gating(logits: Tensor, capacity_factor: float, min_capacity: int) -> Tup
 
     # Compute l_aux
     me = torch.mean(gates, dim=0)
-    ce = torch.mean(mask1.float(), dim=0)
+    ce = torch.mean(mask1.to(dtype), dim=0)
     l_aux = torch.mean(me * ce) * num_experts * num_experts
 
     # Remove locations outside capacity from mask
@@ -301,8 +303,8 @@ def top2gating(logits: Tensor, capacity_factor: float, min_capacity: int) -> Tup
     locations2_s = torch.sum(locations2 * mask2, dim=1)
 
     # Normalize gate probabilities
-    mask1_float = mask1.float()
-    mask2_float = mask2.float()
+    mask1_float = mask1.to(dtype)
+    mask2_float = mask2.to(dtype)
     gates1_s = einsum("se,se->s", gates, mask1_float)
     gates2_s = einsum("se,se->s", gates, mask2_float)
     denom_s = gates1_s + gates2_s
@@ -314,8 +316,8 @@ def top2gating(logits: Tensor, capacity_factor: float, min_capacity: int) -> Tup
     # Calculate combine_weights and dispatch_mask
     gates1 = einsum("s,se->se", gates1_s, mask1_float)
     gates2 = einsum("s,se->se", gates2_s, mask2_float)
-    locations1_sc = _one_hot_to_float(locations1_s, capacity)
-    locations2_sc = _one_hot_to_float(locations2_s, capacity)
+    locations1_sc = _one_hot_to_float(locations1_s, capacity).to(dtype)
+    locations2_sc = _one_hot_to_float(locations2_s, capacity).to(dtype)
     combine1_sec = einsum("se,sc->sec", gates1, locations1_sc)
     combine2_sec = einsum("se,sc->sec", gates2, locations2_sc)
     combine_weights = combine1_sec + combine2_sec
@@ -360,7 +362,7 @@ class TopKGate(Module):
         if k not in (1, 2):
             raise ValueError("Only top-1 and top-2 gatings are supported.")
         # Deepspeed's mechisms, alway use fp32
-        self.wg = torch.nn.Linear(model_dim, num_experts, bias=False).float()
+        self.wg = torch.nn.Linear(model_dim, num_experts, bias=False)
         self.k = k
         self.capacity_factor = capacity_factor
         self.eval_capacity_factor = eval_capacity_factor
@@ -391,7 +393,7 @@ class TopKGate(Module):
 
             return inputs
 
-        self.register_forward_pre_hook(_precision_align_hook)
+        #self.register_forward_pre_hook(_precision_align_hook)
 
     def forward(
         self, inputs: torch.Tensor, used_token: torch.Tensor = None
@@ -400,13 +402,13 @@ class TopKGate(Module):
         if self.wall_clock_breakdown:
             timer("TopKGate").start()
 
-        if self.wg.weight.dtype != torch.float32:  # TODO can we change it to fp16
-            self.wg = self.wg.float()
-        inputs_fp32 = inputs.float()
+        #if self.wg.weight.dtype != torch.float32:  # TODO can we change it to fp16
+        #    self.wg = self.wg.float()
+        #inputs_fp32 = inputs.float()
         # input jittering
-        if self.noisy_gate_policy == "Jitter" and self.training:
-            inputs_fp32 = multiplicative_jitter(inputs_fp32, device=inputs.device)
-        logits = self.wg(inputs_fp32)
+        #if self.noisy_gate_policy == "Jitter" and self.training:
+        #    inputs_fp32 = multiplicative_jitter(inputs_fp32, device=inputs.device)
+        logits = self.wg(inputs)
 
         if self.k == 1:
             gate_output = top1gating(
