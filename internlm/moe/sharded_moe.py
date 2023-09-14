@@ -228,15 +228,6 @@ def top1gating(
     else:
         mask1_rand = mask1
 
-    test_tensor = mask1_rand
-    with torch.no_grad():
-        gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
-        torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-        all_equal = all(tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors)  # pylint: disable=R1729
-
-        if not all_equal:
-            assert False
-
     assert logits.shape[0] >= min_capacity, (
         "No. of tokens (batch-size) should be greater than min_capacity."
         "Either set min_capacity to 0 or increase your batch size."
@@ -386,22 +377,8 @@ class TopKGate(Module):
     def forward(
         self, inputs: torch.Tensor, used_token: torch.Tensor = None
     ) -> Tuple[Tensor, Tensor, Tensor]:  # type: ignore
-
-        dist.all_reduce(self.wg.weight, op=torch.distributed.ReduceOp.AVG, group=gpc.get_group(ParallelMode.TENSOR))
         if self.wall_clock_breakdown:
             timer("TopKGate").start()
-        dist.all_reduce(self.wg.weight, op=dist.ReduceOp.AVG, group=gpc.get_group(ParallelMode.TENSOR))
-        dist.all_reduce(inputs[0], op=dist.ReduceOp.AVG, group=gpc.get_group(ParallelMode.TENSOR))
-        with torch.no_grad():
-            test_tensor = self.wg.weight
-            gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
-            torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-            all_equal = all(
-                tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
-            )  # pylint: disable=R1729
-
-            if not all_equal:
-                assert False
         # if self.wg.weight.dtype != torch.float32:  # TODO can we change it to fp16
         #    self.wg = self.wg.float()
         # inputs_fp32 = inputs.float()
@@ -477,35 +454,6 @@ class MOELayer(Base):
         reshaped_inputs = inputs[0].reshape(-1, d_model)
 
         self.l_aux, combine_weights, dispatch_mask, self.exp_counts = self.gate(reshaped_inputs, inputs[1])
-        with torch.no_grad():
-            test_tensor = self.l_aux
-            gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
-            torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-            all_equal = all(
-                tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
-            )  # pylint: disable=R1729
-
-            if not all_equal:
-                assert False
-            test_tensor = combine_weights
-            gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
-            torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-            all_equal = all(
-                tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
-            )  # pylint: disable=R1729
-
-            if not all_equal:
-                assert False
-            test_tensor = dispatch_mask
-            gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
-            torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-            all_equal = all(
-                tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
-            )  # pylint: disable=R1729
-
-            if not all_equal:
-                assert False
-
         dispatched_inputs = einsum(
             "sec,sm->ecm", dispatch_mask.type_as(inputs[0]), reshaped_inputs
         )  # TODO: heavy memory usage due to long sequence length
@@ -528,14 +476,6 @@ class MOELayer(Base):
             timer("salltoall").start()
 
         expert_output = _AllToAll.apply(self.ep_group, expert_output)
-
-        test_tensor = expert_output
-        gathered_tensors = [torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))]
-        torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-        all_equal = all(tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors)  # pylint: disable=R1729
-
-        if not all_equal:
-            assert False
 
         if self.wall_clock_breakdown:
             timer("salltoall").stop()

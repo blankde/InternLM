@@ -79,7 +79,7 @@ def split_half_float_double(tensor_list):
     return buckets
 
 
-def reduce_tensor(tensor, dtype=None, dst_rank=None, parallel_mode=ParallelMode.DATA):  # pylint: disable=W0613
+def reduce_tensor(tensor, dtype=None, dst_rank=None, parallel_mode=ParallelMode.DATA):
     """
     Reduce the tensor in the data parallel process group
 

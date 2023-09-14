@@ -183,7 +183,6 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList]):
         params = create_moe_param_groups(model, adam_cfg.weight_decay)
     else:
         params = [{"params": model.parameters(), "weight_decay": adam_cfg.weight_decay}]
-    print((len(params)), "==================================", flush=True)
     naive_optimizer = torch.optim.AdamW(
         params=params,
         lr=adam_cfg.lr,
