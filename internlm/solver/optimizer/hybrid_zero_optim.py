@@ -576,6 +576,8 @@ class HybridZeroOptimizer(BaseOptimizer):
         Returns:
             Union[bool, float]: Whether the gradient is success updated, and the gradient.
         """
+        assert closure is None, "closure is not supported by step()"
+
         # if not overlapping communication (no reduction hook is attached)
         # we need to manually reduce these gradients
         if not self._overlap_sync_grad:
@@ -716,6 +718,7 @@ class HybridZeroOptimizer(BaseOptimizer):
 
         # update the parameters
         timer("step").start()
+
         # For those ranks that are not assigned parameters, we just wait for other ranks
         # to send them updated their own parameters.
         if self.has_params:

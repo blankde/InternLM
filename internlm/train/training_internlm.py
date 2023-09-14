@@ -90,74 +90,6 @@ def initialize_model():
     # state in the same dp group are all the same.
     set_mode(ParallelMode.DATA)
 
-    def wrapper(name):  # pylint: disable=W0613
-        def hook_backward_function(module, module_input_grad, module_output_gard):  # pylint: disable=W0613
-            from internlm.core.context.parallel_context import global_context as gpc
-
-            # print("hook!!!",flush=True)
-            with torch.no_grad():
-                for test_tensor in module_input_grad:
-                    if test_tensor is None:
-                        continue
-                    test_tensor = test_tensor.contiguous()
-                    gathered_tensors = [
-                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
-                    ]
-                    torch.distributed.all_gather(
-                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
-                    )
-                    all_equal = all(
-                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
-                    )  # pylint: disable=R1729
-
-                    if not all_equal:
-                        print(name, flush=True)
-                        assert False
-
-                for test_tensor in module_output_gard:
-                    if test_tensor is None:
-                        continue
-                    test_tensor = test_tensor.contiguous()
-                    gathered_tensors = [
-                        torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
-                    ]
-                    torch.distributed.all_gather(
-                        gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR)
-                    )
-                    all_equal = all(
-                        tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
-                    )  # pylint: disable=R1729
-
-                    if not all_equal:
-                        print(name, flush=True)
-                        assert False
-
-        return hook_backward_function
-
-    def grad_hook(name):
-        def hook_func(grad):
-            with torch.no_grad():
-                test_tensor = grad
-                gathered_tensors = [
-                    torch.zeros_like(test_tensor) for _ in range(gpc.get_world_size(ParallelMode.TENSOR))
-                ]
-                torch.distributed.all_gather(gathered_tensors, test_tensor, group=gpc.get_group(ParallelMode.TENSOR))
-                all_equal = all(
-                    tensor.eq(gathered_tensors[0]).all() for tensor in gathered_tensors
-                )  # pylint: disable=R1729
-
-                if not all_equal:
-                    print(name, flush=True)
-                    assert False
-
-        return hook_func
-
-    for name, module in model.model.blocks.named_modules():
-        if "gate" in name:
-            module.register_full_backward_hook(wrapper(name))
-            for name, param in module.named_parameters():
-                param.register_hook(grad_hook(name))
-
     return model
 
 
@@ -189,6 +121,7 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList]):
         betas=(adam_cfg.adam_beta1, adam_cfg.adam_beta2),
         eps=adam_cfg.adam_eps,
     )
+
     optimizer = HybridZeroOptimizer(
         naive_optimizer,
         grad_scal_cfg=gpc.config.grad_scaler,
