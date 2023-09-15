@@ -444,9 +444,12 @@ class PackedFlashInternLm1D(nn.Module):
                     setattr(param, IS_TENSOR_PARALLEL, True)
         self.parallel_output = parallel_output
 
+        if self.tie_embeddings_and_output_weights:
+            self.initialize_word_embeddings(hidden_size, vocab_size, dtype, device)
+
     def forward(self, hidden_states=None, cu_seqlens=None, input_ids=None, indexes=None, inference_params=None):
         # attention_mask: compute attention on the places where the value is 1
-        if hasattr(self, "embedding"):
+        if gpc.is_pipeline_first_stage():
             hidden_states = self.embedding(input_ids)
             if self.embed_grad_scale != 1:
                 hidden_states = (
@@ -500,6 +503,61 @@ class PackedFlashInternLm1D(nn.Module):
             return self.embedding.weight
         else:
             return self.embedding.word_embeddings.weight
+
+    # TODO: refactor code
+    def initialize_word_embeddings(
+        self,
+        hidden_size: int = 768,
+        vocab_size: int = 50304,
+        dtype: torch.dtype = torch.float,
+        device: Optional[torch.device] = None,
+    ):
+        if not self.tie_embeddings_and_output_weights:
+            raise Exception("initialize_word_embeddings() was called but " "tie_embeddings_and_output_weights is false")
+
+        # This function just initializes the word embeddings in the final stage
+        # when we are using pipeline parallelism. Nothing to do if we aren't
+        # using pipeline parallelism.
+        if gpc.get_world_size(ParallelMode.PIPELINE) == 1:
+            return
+
+        # Parameters are shared between the word embeddings layers, and the
+        # heads at the end of the model. In a pipelined setup with more than
+        # one stage, the initial embedding layer and the head are on different
+        # workers, so we do the following:
+        # 1. Create a second copy of word_embeddings on the last stage, with
+        #    initial parameters of 0.0.
+        # 2. Do an all-reduce between the first and last stage to ensure that
+        #    the two copies of word_embeddings start off with the same
+        #    parameter values.
+        # 3. In the training loop, before an all-reduce between the grads of
+        #    the two word_embeddings layers to ensure that every applied weight
+        #    update is the same on both stages.
+        if gpc.is_pipeline_last_stage():
+            assert not gpc.is_pipeline_first_stage()
+            # set word_embeddings weights to 0 here, then copy first
+            # stage's weights using all_reduce below.
+            self.embedding = ParallelGPT2Embeddings(
+                embed_dim=hidden_size,
+                vocab_size=vocab_size,
+                max_position_embeddings=-1,
+                process_group=gpc.get_group(ParallelMode.TENSOR),
+                padding_idx=None,
+                sequence_parallel=gpc.config.parallel.sequence_parallel,
+                device=device,
+                dtype=dtype,
+            )
+            for _, param in self.embedding.named_parameters():
+                if gpc.get_world_size(ParallelMode.TENSOR) > 1:
+                    setattr(param, IS_TENSOR_PARALLEL, True)
+            self.shared_embedding_or_output_weight().data.fill_(0)
+
+        # Ensure that first and last stages have the same initial parameter
+        # values.
+        if gpc.is_pipeline_first_stage() or gpc.is_pipeline_last_stage():
+            torch.distributed.all_reduce(
+                self.shared_embedding_or_output_weight().data, group=gpc.get_group(ParallelMode.EMBEDDING)
+            )
 
 
 def _build_generic_model_1d(num_layers, num_chunks, device=torch.device("cuda"), **kwargs):
