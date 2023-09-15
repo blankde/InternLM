@@ -38,6 +38,10 @@ class NaiveAMPModel(nn.Module):
     ):
         super().__init__()
         self.model = model.to(dtype)
+        for name, module in model.named_modules():
+            if "gate" in name:
+                #print(name)
+                module = module.float()
         self._output_to_fp32 = output_to_fp32
         self._sync_buf = sync_buffer
         self.dtype = dtype
