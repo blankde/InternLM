@@ -159,6 +159,9 @@ class PackedFlashBaseLayer1D(nn.Module):
                     device=device,
                     dtype=dtype,
                 )
+            for _, param in self.mlp.named_parameters():
+                if gpc.get_world_size(ParallelMode.TENSOR) > 1:
+                    setattr(param, IS_TENSOR_PARALLEL, True)
         else:
             # replace mlp by MoE module. The expert in MoE is a FeedForward module.
             self.mlp = MoE(
@@ -176,6 +179,9 @@ class PackedFlashBaseLayer1D(nn.Module):
                 device=device,
                 dtype=dtype,
             )
+            for _, param in self.mlp.moe_layer.experts.named_parameters():
+                if gpc.get_world_size(ParallelMode.TENSOR) > 1:
+                    setattr(param, IS_TENSOR_PARALLEL, True)
 
         self.dropout2 = nn.Dropout(drop_rate)
         self.use_swiglu = use_swiglu

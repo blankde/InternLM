@@ -184,8 +184,6 @@ def initialize_model():
             module.register_full_backward_hook(wrapper(name))
             for name, param in module.named_parameters():
                 param.register_hook(grad_hook(name))
-        if "expert" in name:
-            module.register_full_backward_hook(wrapper(name))
 
     return model
 
