@@ -123,6 +123,11 @@ class PackedFlashBaseLayer1D(nn.Module):
             self.norm1 = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
             self.norm2 = nn.LayerNorm(hidden_size, eps=layer_norm_epsilon)
 
+        for param in self.norm1.parameters():
+            param.is_norm = True
+        for param in self.norm2.parameters():
+            param.is_norm = True
+
         self.num_experts = num_experts
         self.moe_gate_k = moe_gate_k
         self.moe_capacity_factor = moe_capacity_factor
@@ -449,6 +454,7 @@ class PackedFlashInternLm1D(nn.Module):
 
     def forward(self, hidden_states=None, cu_seqlens=None, input_ids=None, indexes=None, inference_params=None):
         # attention_mask: compute attention on the places where the value is 1
+        # old condition may fail when use shared embedding
         if gpc.is_pipeline_first_stage():
             hidden_states = self.embedding(input_ids)
             if self.embed_grad_scale != 1:
