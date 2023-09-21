@@ -11,7 +11,7 @@ from torch.optim import Optimizer
 
 from internlm.core.context import Config, ParallelMode
 from internlm.core.context import global_context as gpc
-from internlm.model.utils import is_gate_param, is_moe_param
+from internlm.model.utils import is_moe_param
 from internlm.monitor import send_alert_message
 from internlm.solver.optimizer.store import (
     BucketStore,
@@ -126,7 +126,6 @@ class HybridZeroOptimizer(BaseOptimizer):
         self._param_store = ParameterStore(ParallelMode.ZERO1)
         self._grad_store = GradientStore(ParallelMode.DATA)
         self._bucket_store = BucketStore(ParallelMode.DATA)
-        self._gate_bucket_store = BucketStore(ParallelMode.DATA)
         self._bucket_in_progress = []
 
         # fp16 and fp32 params for mixed precision training
@@ -354,13 +353,8 @@ class HybridZeroOptimizer(BaseOptimizer):
         # check if the bucket is full
         # if full, will reduce the grads already in the bucket
         # after reduction, the bucket will be empty
-        if is_gate_param(param):
-            current_bucket = self._gate_bucket_store
-        else:
-            current_bucket = self._bucket_store
-
-        if current_bucket.num_elements_in_bucket(reduce_rank) + param_size > self._reduce_bucket_size:
-            self._reduce_grads_stored_in_bucket(current_bucket, reduce_rank, last_bucket=False)
+        if self._bucket_store.num_elements_in_bucket(reduce_rank) + param_size > self._reduce_bucket_size:
+            self._reduce_grads_stored_in_bucket(reduce_rank, last_bucket=False)
 
         # the param must not be reduced to ensure correctness
         is_param_reduced = self._param_store.is_param_reduced(param)
@@ -374,19 +368,19 @@ class HybridZeroOptimizer(BaseOptimizer):
         # the param must have grad for reduction
         assert param.grad is not None, f"Parameter of size ({param.size()}) has None grad, cannot be reduced"
 
-        current_bucket.add_num_elements_in_bucket(param_size, reduce_rank)
-        current_bucket.add_grad(param.grad, reduce_rank)
-        current_bucket.add_param(param, reduce_rank)
+        self._bucket_store.add_num_elements_in_bucket(param_size, reduce_rank)
+        self._bucket_store.add_grad(param.grad, reduce_rank)
+        self._bucket_store.add_param(param, reduce_rank)
 
-    def _reduce_grads_stored_in_bucket(self, current_bucket, reduce_rank=None, last_bucket=False):
+    def _reduce_grads_stored_in_bucket(self, reduce_rank=None, last_bucket=False):
         # reduce grads
         self._reduce_grads_by_rank(
             reduce_rank=reduce_rank,
-            grads=current_bucket.get_grad(reduce_rank=reduce_rank),
-            bucket_size=current_bucket.num_elements_in_bucket(reduce_rank),
+            grads=self._bucket_store.get_grad(reduce_rank=reduce_rank),
+            bucket_size=self._bucket_store.num_elements_in_bucket(reduce_rank),
         )
 
-        params_in_bucket = current_bucket.get_param(reduce_rank=reduce_rank)
+        params_in_bucket = self._bucket_store.get_param(reduce_rank=reduce_rank)
 
         for param in params_in_bucket:
             # the is_param_reduced flag should be False showing that
@@ -407,7 +401,7 @@ class HybridZeroOptimizer(BaseOptimizer):
                 self._param_store.add_reduced_param_for_compute_norm(param, last_bucket)
             else:
                 self._param_store.add_previous_reduced_param(param)
-        current_bucket.reset_by_rank(reduce_rank)
+        self._bucket_store.reset_by_rank(reduce_rank)
 
     def _reduce_grads_by_rank(self, reduce_rank, grads, bucket_size):
         grad_buckets_by_dtype = split_half_float_double(grads)
@@ -590,8 +584,7 @@ class HybridZeroOptimizer(BaseOptimizer):
                     if param.grad is not None and not is_moe_param(param):
                         self._store_and_try_reduce_grads_by_bucket(param)
         # we need to reduce the gradients left in the communication bucket
-        self._reduce_grads_stored_in_bucket(self._bucket_store, reduce_rank=None, last_bucket=True)
-        self._reduce_grads_stored_in_bucket(self._gate_bucket_store, reduce_rank=None, last_bucket=True)
+        self._reduce_grads_stored_in_bucket(reduce_rank=None, last_bucket=True)
 
         # compute norm for gradients in the before bucket
         groups_norms = []
