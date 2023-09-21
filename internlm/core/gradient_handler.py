@@ -98,4 +98,7 @@ class EmbeddingSharedModuleGradientHandler(BaseGradientHandler):
         ):
             weight = self._model.model.shared_embedding_or_output_weight()
             grad = weight.grad
+            # enable zero will cause grad to be None
+            if grad is None:
+                grad = torch.zeros_like(weight)
             torch.distributed.all_reduce(grad, group=gpc.get_group(parallel_mode=ParallelMode.EMBEDDING))
