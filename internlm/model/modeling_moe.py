@@ -567,6 +567,7 @@ def build_model_with_moe_cfg(
     moe_drop_tokens: bool = True,
     moe_use_rts: bool = True,
     moe_use_residual: bool = False,
+    use_tutel: bool = False,  # pylint: disable=W0613
 ):
     """
     Build model with config.
@@ -608,6 +609,7 @@ def build_model_with_moe_cfg(
         moe_use_rts (bool, optional): default=True, whether to use Random Token Selection.
         moe_use_residual (bool, optional): default=False, make this MoE layer a Residual MoE
                                            (https://arxiv.org/abs/2201.05596) layer.
+        use_tutel (bool): whether to use tutel to do moe overlap
     """
 
     cfg = dict(

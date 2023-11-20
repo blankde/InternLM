@@ -144,6 +144,7 @@ model = dict(
     num_experts=8,
     moe_use_residual=False,
     moe_gate_k=2,
+    use_tutel=False,
 )
 """
 zero1 parallel:
