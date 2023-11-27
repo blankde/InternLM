@@ -216,33 +216,29 @@ def top2gating(logits: Tensor, capacity_factor: float, min_capacity: int) -> Tup
     ce = torch.mean(mask1.type_as(logits), dim=0)
     l_aux = torch.mean(me * ce) * num_experts * num_experts
 
+    # merge operands in topk gating to save launch overhead
+    masks = torch.stack((mask1, mask2), dim=0)
+    locations = torch.stack((locations1, locations2), dim=0)
+
     # Remove locations outside capacity from mask
-    mask1 *= torch.lt(locations1, capacity)
-    mask2 *= torch.lt(locations2, capacity)
+    masks *= torch.lt(locations, capacity)
 
     # Store the capacity location for each token
-    locations1_s = torch.sum(locations1 * mask1, dim=1)
-    locations2_s = torch.sum(locations2 * mask2, dim=1)
+    locations_s = torch.sum(locations * masks, dim=2)
 
     # Normalize gate probabilities
-    mask1_float = mask1.type_as(logits)
-    mask2_float = mask2.type_as(logits)
-    gates1_s = einsum("se,se->s", gates, mask1_float)
-    gates2_s = einsum("se,se->s", gates, mask2_float)
-    denom_s = gates1_s + gates2_s
+    mask_float = masks.type_as(logits)
+    gate_s = einsum("se,kse->ks", gates, mask_float)
+    denom_s = torch.sum(gate_s, dim=0)
     # Avoid divide-by-zero
     denom_s = torch.clamp(denom_s, min=torch.finfo(denom_s.dtype).eps)
-    gates1_s /= denom_s
-    gates2_s /= denom_s
+    gate_s /= denom_s
 
     # Calculate combine_weights and dispatch_mask
-    gates1 = einsum("s,se->se", gates1_s, mask1_float)
-    gates2 = einsum("s,se->se", gates2_s, mask2_float)
-    locations1_sc = F.one_hot(locations1_s, num_classes=capacity).type_as(logits)
-    locations2_sc = F.one_hot(locations2_s, num_classes=capacity).type_as(logits)
-    combine1_sec = einsum("se,sc->sec", gates1, locations1_sc)
-    combine2_sec = einsum("se,sc->sec", gates2, locations2_sc)
-    combine_weights = combine1_sec + combine2_sec
+    gate_all = einsum("ks,kse->kse", gate_s, mask_float)
+    locations_sc = F.one_hot(locations_s, num_classes=capacity).type_as(logits)
+    combine_sec = einsum("kse,ksc->ksec", gate_all, locations_sc)
+    combine_weights = torch.sum(combine_sec, dim=0)
     dispatch_mask = combine_weights.bool()
 
     return l_aux, combine_weights, dispatch_mask, exp_counts

@@ -4,7 +4,7 @@ from .communication import moe_all_to_all, moe_stream_acquire, moe_stream_releas
 
 # einsum rewrites are on par or more performant
 # switch can be bubbled up in future
-USE_EINSUM = True
+USE_EINSUM = False
 
 
 # einsum dimensions: (g)roup, (s)equence, (e)xpert, (m)odel, (c)apacity
@@ -13,14 +13,23 @@ def einsum(rule, a, b):
     if USE_EINSUM:
         return torch.einsum(rule, a, b)
     elif rule == "s,se->se":
-        # [1, s] * [s, e]
+        # [s, 1] * [s, e]
         return a.reshape(a.shape[0], -1) * b
+    elif rule == "ks,kse->kse":
+        # [k, s, 1] * [s, e]
+        return a.reshape(a.shape[0], a.shape[1], -1) * b
     elif rule == "se,sc->sec":
         # [s,e,1] * [s,1,c]
         return a.unsqueeze(2) * b.unsqueeze(1)
+    elif rule == "kse,ksc->ksec":
+        # [k,s,e,1] * [k,s,1,c]
+        return a.unsqueeze(3) * b.unsqueeze(2)
     elif rule == "se,se->s":
         # [s,1,e] * [s,e,1]
         return torch.bmm(a.unsqueeze(1), b.unsqueeze(2)).reshape(-1)
+    elif rule == "se,kse->ks":
+        # [s,1,e] * [k,s,e,1]
+        return torch.matmul(a.unsqueeze(1), b.unsqueeze(3)).reshape(b.shape[0], -1)
     elif rule == "sec,sm->ecm":
         # [e*c, s] * [s, m]
         s = a.shape[0]
