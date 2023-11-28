@@ -146,6 +146,7 @@ model = dict(
     moe_gate_k=2,
     use_tutel=False,
     moe_overlap_degree=1,
+    moe_noisy_gate_policy="RSample",
 )
 """
 zero1 parallel:

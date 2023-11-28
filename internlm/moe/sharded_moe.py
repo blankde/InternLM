@@ -182,43 +182,53 @@ def top1gating(
     return l_aux, combine_weights, dispatch_mask, exp_counts
 
 
-def top2gating(logits: Tensor, capacity_factor: float, min_capacity: int) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+def top2gating(
+    logits: Tensor,
+    capacity_factor: float,
+    min_capacity: int,
+    noisy_gate_policy: Optional[str] = None,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """Implements Top2Gating on logits."""
     # everything is in fp32 in this function
     gates = F.softmax(logits, dim=1)
+    num_experts = int(gates.shape[1])
 
     capacity = _capacity(gates, torch.tensor(capacity_factor * 2), torch.tensor(min_capacity))
 
-    # Create a mask for 1st's expert per token
-    indices1_s = torch.argmax(gates, dim=1)
-    num_experts = int(gates.shape[1])
-    mask1 = F.one_hot(indices1_s, num_classes=num_experts)
+    if noisy_gate_policy == "RSample":
+        # Create a mask for 1st's expert per token
+        indices1_s = torch.argmax(gates, dim=1)
+        mask1 = F.one_hot(indices1_s, num_classes=num_experts)
 
-    # Create a mask for 2nd's expert per token using Gumbel-max trick
-    # https://timvieira.github.io/blog/post/2014/07/31/gumbel-max-trick/
-    logits_w_noise = logits + gumbel_rsample(logits.shape, device=logits.device)
-    # Replace top-expert with min value
-    logits_except1 = logits_w_noise.masked_fill(mask1.bool(), torch.finfo(logits.dtype).min)
-    indices2_s = torch.argmax(logits_except1, dim=1)
-    mask2 = F.one_hot(indices2_s, num_classes=num_experts)
+        # Create a mask for 2nd's expert per token using Gumbel-max trick
+        # https://timvieira.github.io/blog/post/2014/07/31/gumbel-max-trick/
+        logits_w_noise = logits + gumbel_rsample(logits.shape, device=logits.device)
+        # Replace top-expert with min value
+        logits_except1 = logits_w_noise.masked_fill(mask1.bool(), torch.finfo(logits.dtype).min)
+        indices2_s = torch.argmax(logits_except1, dim=1)
+        mask2 = F.one_hot(indices2_s, num_classes=num_experts)
+        # merge operands in topk gating to save launch overhead
+        masks = torch.cat((mask1, mask2), dim=0)
+    else:
+        # Create a mask by top-2 experts
+        indices_s = torch.topk(gates, 2, dim=1).indices
+        indices_s = indices_s.permute(1, 0).reshape(-1)
+        masks = F.one_hot(indices_s, num_classes=num_experts)
 
     # Compute locations in capacity buffer
-    locations1 = torch.cumsum(mask1, dim=0) - 1
-    locations2 = torch.cumsum(mask2, dim=0) - 1
-    # Update 2nd's location by accounting for locations of 1st
-    locations2 += torch.sum(mask1, dim=0, keepdim=True)
+    locations = torch.cumsum(masks, dim=0) - 1
+
+    # reshape (s,e) to (k,s,e)
+    masks = masks.reshape(-1, gates.shape[0], num_experts)
+    locations = locations.reshape(-1, gates.shape[0], num_experts)
 
     # gating decisions
-    exp_counts = torch.sum(mask1, dim=0).detach().to("cpu")
+    exp_counts = torch.sum(masks[0], dim=0).detach().to("cpu")
 
     # Compute l_aux
     me = torch.mean(gates, dim=0)
-    ce = torch.mean(mask1.type_as(logits), dim=0)
+    ce = torch.mean(masks[0].type_as(logits), dim=0)
     l_aux = torch.mean(me * ce) * num_experts * num_experts
-
-    # merge operands in topk gating to save launch overhead
-    masks = torch.stack((mask1, mask2), dim=0)
-    locations = torch.stack((locations1, locations2), dim=0)
 
     # Remove locations outside capacity from mask
     masks *= torch.lt(locations, capacity)
@@ -310,7 +320,10 @@ class TopKGate(Module):
 
         else:
             gate_output = top2gating(
-                logits, self.capacity_factor if self.training else self.eval_capacity_factor, self.min_capacity
+                logits,
+                self.capacity_factor if self.training else self.eval_capacity_factor,
+                self.min_capacity,
+                self.noisy_gate_policy,
             )
 
         return gate_output

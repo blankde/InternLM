@@ -297,6 +297,8 @@ def args_sanity_check():
             model._add_item("use_tutel", False)
         if "moe_overlap_degree" not in model:
             model._add_item("moe_overlap_degree", 1)
+        if "moe_noisy_gate_policy" not in model:
+            model._add_item("moe_noisy_gate_policy", None)
     # process the parallel config
     if "sequence_parallel" not in gpc.config.parallel:
         gpc.config.parallel._add_item("sequence_parallel", False)
