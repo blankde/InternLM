@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Module
 
+from internlm.core.context.parallel_context import global_context as gpc
 from internlm.utils.logger import get_logger
 from internlm.utils.megatron_timers import megatron_timer as timer
 
@@ -431,6 +432,10 @@ class MOELayer(Base):
         reshaped_inputs = inputs[0].reshape(-1, d_model)
 
         self.l_aux, combine_weights, dispatch_mask, self.exp_counts = self.gate(reshaped_inputs, inputs[1])
+        if gpc.config.get("moe_profiling", False):
+            is_dropped = ~(dispatch_mask.any(-1).any(-1))
+            gpc.moe_metric.token_dropped_rate.append((is_dropped.sum() / is_dropped.size(0)).item())
+
         dispatched_inputs = einsum(
             "sec,sm->ecm", dispatch_mask.type_as(inputs[0]), reshaped_inputs
         )  # TODO: heavy memory usage due to long sequence length

@@ -414,6 +414,7 @@ def record_current_batch_training_metrics(
     grad_norm,
     metric,
     update_panel,
+    avg_token_dropped_rate=0.0,
 ):
     """
     Print some training metrics of current batch.
@@ -509,6 +510,8 @@ def record_current_batch_training_metrics(
         }
         if moe_loss is not None:
             infos["moe_loss"] = moe_loss.item()
+        if gpc.config.get("moe_profiling", False):
+            infos["avg_token_dropped_rate"] = avg_token_dropped_rate
 
         infos["micro_num"] = len(batch[1])
         infos["num_consumed_tokens"] = train_state.num_consumed_tokens

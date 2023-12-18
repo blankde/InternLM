@@ -121,6 +121,24 @@ class Config(dict):
         return config
 
 
+class MoEStatistics:
+    """
+    This class stores the metrics for moe training.
+
+    """
+
+    def __init__(self):
+        self.token_dropped_rate = []
+
+    def avg_token_dropped_rate(self):
+        if len(self.token_dropped_rate) == 0:
+            return 0.0
+        return sum(self.token_dropped_rate) / len(self.token_dropped_rate)
+
+    def reset(self):
+        self.token_dropped_rate = []
+
+
 class ParallelContext(metaclass=SingletonMeta):
     """This class provides interface functions for users to get the parallel context,
     such as the global rank, the local rank, the world size, etc. of each device.
@@ -138,6 +156,9 @@ class ParallelContext(metaclass=SingletonMeta):
 
         # load config from file
         self._config = None
+
+        # moe metric
+        self._moe_metric = MoEStatistics()
 
         # default parallel args, will be overwritten during process group intialization
         self.world_size = 1
@@ -171,6 +192,10 @@ class ParallelContext(metaclass=SingletonMeta):
     @property
     def expert_parallel_group_names(self):
         return self._expert_parallel_group_names
+
+    @property
+    def moe_metric(self):
+        return self._moe_metric
 
     def load_config(self, config: Union[dict, str]):
         """Loads the configuration from either a dict or a file.
