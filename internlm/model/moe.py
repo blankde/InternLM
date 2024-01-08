@@ -5,7 +5,7 @@ import torch
 from internlm.core.context import ParallelMode
 from internlm.core.context import global_context as gpc
 from internlm.model.linear import FeedForward
-from internlm.moe import GShardMOELayer
+from internlm.moe import GShardMOELayer, NaiveMOELayer
 from internlm.utils.logger import get_logger
 
 # global llm logger
@@ -81,7 +81,16 @@ class MoE(torch.nn.Module):
                 device,
                 dtype,
             )
-
+        elif moe_type == "Naive":
+            self.moe_layer = NaiveMOELayer(
+                hidden_size,
+                gpc.get_group(ParallelMode.EXPERT),
+                ep_size,
+                num_experts,
+                topk,
+                device,
+                dtype,
+            )
         # residual network, see https://arxiv.org/pdf/2201.05596.pdf, seems useful for convergence
         self.use_residual = use_residual
         if use_residual:
