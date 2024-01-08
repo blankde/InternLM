@@ -42,7 +42,6 @@ def revert(filename, src, tgt, layers_per_stage, num_experts):
         global_layer_id += 1
 
     torch.save(state, os.path.join(tgt, filename))
-    state = load(os.path.join(tgt, filename))
 
 
 def print_args(args):
